@@ -7,8 +7,12 @@ import traceback
 from pathlib import Path
 
 from db import (
+    DEFAULT_HEARTBEAT_STALE_SECONDS,
+    STALE_HEARTBEAT_REASON,
     lease_job,
     heartbeat_job,
+    get_job_heartbeat_state,
+    reclaim_stale_jobs,
     report_job_progress,
     complete_job,
     fail_job,
@@ -231,9 +235,21 @@ def _worker_grace_period_seconds() -> float:
         return DEFAULT_WORKER_GRACE_PERIOD_SECONDS
 
 
+def _worker_heartbeat_stale_seconds() -> float:
+    raw = os.getenv("WORKER_HEARTBEAT_STALE_SECONDS")
+    if raw is None or not raw.strip():
+        return DEFAULT_HEARTBEAT_STALE_SECONDS
+    try:
+        val = float(raw)
+        return val if val > 0 else DEFAULT_HEARTBEAT_STALE_SECONDS
+    except ValueError:
+        return DEFAULT_HEARTBEAT_STALE_SECONDS
+
+
 def run_worker(
     stop_event: threading.Event | None = None,
     grace_period_seconds: float | None = None,
+    heartbeat_stale_seconds: float | None = None,
 ):
     init_db()
     config = load_config()
@@ -246,6 +262,9 @@ def run_worker(
 
     if grace_period_seconds is None:
         grace_period_seconds = _worker_grace_period_seconds()
+
+    if heartbeat_stale_seconds is None:
+        heartbeat_stale_seconds = _worker_heartbeat_stale_seconds()
 
     def _signal_handler(signum, frame):
         LOGGER.info(f"Received signal {signum}, initiating graceful shutdown")
@@ -278,6 +297,24 @@ def run_worker(
                     sweep_job_files()
                 except Exception as e:
                     LOGGER.error("Job file sweep failed: %s", type(e).__name__)
+
+            try:
+                reclaimed = reclaim_stale_jobs(stale_after_seconds=heartbeat_stale_seconds)
+                for item in reclaimed:
+                    log_structured(
+                        LOGGER,
+                        logging.WARNING,
+                        {
+                            "event": "stale_worker_heartbeat",
+                            "job_id": item["id"],
+                            "job_type": item["type"],
+                            "reason": STALE_HEARTBEAT_REASON,
+                            "retryable": True,
+                            "cryptographic_failure": False,
+                        },
+                    )
+            except Exception as e:
+                LOGGER.error("Stale heartbeat check failed: %s", type(e).__name__)
 
             job = lease_job(
                 WORKER_ID,

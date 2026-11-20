@@ -128,6 +128,21 @@ limited to removing the workload, its focused coverage, and this documentation;
 use normal test-data retention procedures for any synthetic events already
 created.
 
+## Worker Stale Heartbeat Handling
+
+Background workers extend active job leases via `heartbeat_job` and check for
+stale heartbeats via `get_job_heartbeat_state` and `reclaim_stale_jobs`.
+
+- Environment override: `WORKER_HEARTBEAT_STALE_SECONDS` (default: `300`, must
+  be positive).
+- When a `running` job's heartbeat age reaches or exceeds the stale threshold,
+  it is re-queued to `pending` with a retryable `processing_state` reason
+  (`stale_worker_heartbeat`, `retryable: true`, `category: "processing_state"`,
+  `cryptographic_failure: false`).
+- Stale heartbeats are reported independently of proof validity: unverified or
+  incomplete worker output is never classified as a cryptographic failure, and
+  private job payloads are never included in reclaimed-job summaries or logs.
+
 ## Noir Developer Worker
 
 `POST /api/noir/silent-witness` generates video-specific Silent Witness proof
