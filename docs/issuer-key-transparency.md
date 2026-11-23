@@ -29,6 +29,8 @@ Each issuer publishes a versioned manifest (`protocol: harpocrates-issuer-key-tr
 
 Canonical encoding is deterministic JSON (`sort_keys`, compact separators). Digest = SHA-256 of the unsigned body.
 
+Manifest `version` must be the integer `1`; booleans and non-integer values are rejected rather than coerced. An optional `criticalExtensions` list must be empty because manifest version 1 understands no extensions. Any non-empty list, or a non-list value, raises `TransparencyError` instead of being ignored, so an issuer cannot make a client accept a manifest whose required semantics it does not implement. Unknown top-level manifest fields remain forward-compatible and are ignored.
+
 ## Append-only lifecycle events
 
 Event types: `activation`, `rotation`, `compromise`, `retirement`, `checkpoint`.
@@ -71,7 +73,18 @@ Use `require_fresh_checkpoint(..., high_assurance=True)` before accepting high-a
 
 Key rotation sets `validUntil` on the predecessor. Signatures whose timestamp falls inside the key’s validity window remain valid after rotation. Compromised keys similarly retain validity for pre-compromise timestamps; verifiers must surface compromise status for post-compromise risk decisions.
 
+Use `explain_historical_key_validity(directory, key_id, signature_timestamp, max_events=MAX_EXPLANATION_EVENTS)` to obtain a bounded `HistoricalKeyValidityExplanation` record. It reuses `key_valid_for_historical_signature` and `key_was_compromised_at`, attaches a stable `HistoricalValidityReason` code (`valid_active_key`, `valid_before_rotation`, `valid_before_retirement`, `valid_before_compromise`, `unknown_key`, `before_activation`, `rotated_before_signature_time`, `retired_before_signature_time`, `compromised_at_signature_time`, `expired_before_signature_time`), and includes up to `MAX_EXPLANATION_EVENTS` (`16`) public `LifecycleEventRef` entries (capped at `MAX_EXPLANATION_BYTES = 4096` in canonical JSON). Private evidence identifiers, media digests, and raw organization fields are never included in the explanation record.
+
 The registry expresses the same window on chain: `rotate_issuer` retires the predecessor key immediately (it can no longer sign new seals, directly or through a delegation) and records a bounded `grace_expires_at` during which `is_issuer_verifiable(predecessor)` keeps pre-rotation evidence verifiable. The window lapses on its own against ledger time and `finalize_issuer_rotation` settles the record. Because the on-chain window is capped by `MAX_ISSUER_ROTATION_GRACE_SECS`, a retired key’s manifest `validUntil` should not be set beyond that bound; `revoke_issuer` and `add_issuer` clear the on-chain record, so a compromised or re-onboarded key is never covered by a stale grace window.
+
+## Trust-policy simulation report
+
+Operators can preview trust-policy changes against synthetic or captured evidence attestations (`CaptureAttestation`) before activating a new policy version using `simulate_trust_policy` in `backend/issuer_key_transparency.py`:
+
+- **Inputs**: an iterable of `CapturedEvidenceSample` records (bounded by `MAX_SIMULATION_ITEMS`), an immutable baseline `TrustPolicy` (the active policy), an immutable candidate `TrustPolicy`, and optional `IssuerDirectory` / `DirectoryCache` / `now` context.
+- **Non-mutating**: both `TrustPolicy` objects, the directory, and the checkpoint cache are read-only; the report explicitly records `activePolicyMutated: false`.
+- **Fail-closed evaluation**: `evaluate_captured_evidence` checks trust levels, privacy scopes, app signing digest requirements, secure-time source and drift bounds, camera pipeline integrity claims, historical issuer key validity / rotation / compromise rules, and checkpoint freshness (standard and high-assurance). Missing directory or signature timestamp context for keyed samples fails closed.
+- **Canonical privacy-preserving output**: `PolicySimulationReport` includes summary counts (`totalEvaluated`, `unchangedCount`, `changedCount`, `newlyRejectedCount`, `newlyAcceptedCount`, `reasonChangedCount`) and only the changed outcomes (`changes`) identified by `evidenceId` and `attestationHash` (never `captureNonce`, `deviceCommitment`, or raw PII). Use `canonicalize_simulation_report` and `simulation_report_hash` for deterministic digests.
 
 ## Operational procedures
 
